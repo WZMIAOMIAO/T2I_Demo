@@ -1,0 +1,20 @@
+dataset_path: "/home/wz/datasets/ImageNet256_latents"
+use_extract_latents: true
+
+vae_path: "stabilityai/sd-vae-ft-mse"
+dit_name: "DiT-L/2"
+resume: ""
+base_seed: 123
+epochs: 500
+batch_size: 32
+accumulate_gradient_steps: 1
+num_workers: 8
+save_ckpt_interval: 5000
+save_dir: "outputs"
+
+lr: 1.0e-4
+weight_decay: 0.
+time_shift: 1.6
+cfg_prob: 0.1
+use_ema: true
+ema_decay: 0.999
