@@ -13,6 +13,7 @@ class VAEModule:
         self.device = device
         self.dtype = dtype
         self.downsample_ratio = 8
+        self.latent_channels = 4
         self.vae = AutoencoderKL.from_pretrained(pretrained_model_name_or_path)
         self.vae = self.vae.to(dtype=dtype, device=device)
         self.vae.eval()
