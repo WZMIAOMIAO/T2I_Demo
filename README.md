@@ -31,6 +31,9 @@ torchrun --master-addr=127.0.0.1 --master-port=12345 --nnodes=1 --nproc-per-node
 torchrun --master-addr=127.0.0.1 --master-port=12345 --nnodes=1 --nproc-per-node=8 --node-rank=0 train.py --cfg-file=train_cfg.yaml
 ```
 
+## 推理
+推理参考`inference.py`脚本。
+
 ## 调试
 若需要使用vscode debug进行单步调试，需要配置`launch.json`文件，文件内容可参考：
 ```json
