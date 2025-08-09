@@ -6,12 +6,12 @@ from tqdm import tqdm
 
 from models.dit import DiT_L_2
 from models.vae import VAEModule
-from schedulers.rectified_flow_scheduler import EulerDiscreteSamplingScheduler as SamplingScheduler
+from schedulers.rectified_flow_scheduler import RFScheduler
 
 
 @torch.inference_mode()
 def main():
-    timeshift = 1.6
+    time_shift = 1.6
     num_inference_steps = 50
     cfg_scale = 4.0
     seed = 1234
@@ -33,13 +33,9 @@ def main():
 
     vae = VAEModule(pretrained_model_name_or_path=vae_path, device=device)
 
-    scheduler = SamplingScheduler(
-        model=dit,
-        num_inference_steps=num_inference_steps,
-        time_shift=timeshift,
-        device=device
-    )
-    print(f"inference sigmas: {scheduler.sigmas}")
+    scheduler = RFScheduler(time_shift=time_shift, device=device)
+    scheduler.set_inference_params(num_inference_steps=num_inference_steps)
+    print(f"inference sigmas: {scheduler.inference_sigmas}")
 
     # Ensure that the initial latents created by different devices is consistent.
     generator = torch.Generator("cpu")
@@ -55,6 +51,7 @@ def main():
     for label in tqdm([4, 10, 12, 20, 25]):
         latents = init_latents.clone()
         latents = scheduler.generate(
+            model=dit,
             latents=latents,
             labels=[label],
             cfg_scale=cfg_scale
