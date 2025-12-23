@@ -153,7 +153,7 @@ class Trainer:
                     self.accumulate_loss = 0
                     self.accumulate_time = 0
 
-                    if self.global_step % self.args.save_ckpt_interval == 0:
+                    if self.update_step % self.args.save_ckpt_interval == 0:
                         if self.args.rank == 0:
                             checkpoint = {
                                 "model": self.dit.module.state_dict(),
