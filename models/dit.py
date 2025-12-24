@@ -118,33 +118,17 @@ class LabelEmbedder(nn.Module):
     """
     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
     """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+    def __init__(self, num_classes, hidden_size):
         super().__init__()
-        use_cfg_embedding = dropout_prob > 0
-        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, 256)
+        self.embedding_table = nn.Embedding(num_classes + 1, 256)
         self.num_classes = num_classes
-        self.dropout_prob = dropout_prob
         self.mlp = nn.Sequential(
             nn.Linear(256, hidden_size, bias=True),
             nn.SiLU(),
             nn.Linear(hidden_size, hidden_size, bias=True),
         )
 
-    def token_drop(self, labels, force_drop_ids=None):
-        """
-        Drops labels to enable classifier-free guidance.
-        """
-        if force_drop_ids is None:
-            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-        else:
-            drop_ids = force_drop_ids == 1
-        labels = torch.where(drop_ids, self.num_classes, labels)
-        return labels
-
-    def forward(self, labels, force_drop_ids=None):
-        use_dropout = self.dropout_prob > 0
-        if (self.training and use_dropout) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, force_drop_ids)
+    def forward(self, labels):
         embeddings = self.embedding_table(labels)
         embeddings = self.mlp(embeddings)
         return embeddings
@@ -336,7 +320,6 @@ class DiT(nn.Module):
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
-        class_dropout_prob=0.1,
         num_classes=1000,
         fused_attn=True
     ):
@@ -352,7 +335,7 @@ class DiT(nn.Module):
         self.h_embedder = TimestepEmbedder(hidden_size)
         self.w_embedder = TimestepEmbedder(hidden_size)
         self.interval_embedder = TimestepEmbedder(hidden_size)
-        self.c_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        self.c_embedder = LabelEmbedder(num_classes, hidden_size)
         cond_seq = 4 + 4 + 4 + 2 + 2 + 8
         self.learnable_embed = nn.Parameter(torch.zeros(1, cond_seq, hidden_size), requires_grad=True)
         self.pos_embed = FluxPosEmbed(1000, self.axes_dim)
@@ -361,20 +344,17 @@ class DiT(nn.Module):
             [DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, fused_attn=fused_attn) for _ in range(depth)]
         )
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
-        # self.initialize_weights()
+        self.initialize_weights()
 
     def initialize_weights(self):
         # Initialize transformer layers:
         def _basic_init(module):
             if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
+                fan_in = module.weight.size(1)
+                torch.nn.init.normal_(module.weight, std=math.sqrt(0.1) / math.sqrt(fan_in))
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
         self.apply(_basic_init)
-
-        # Initialize (and freeze) pos_embed by sin-cos embedding:
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
         w = self.x_embedder.proj.weight.data
@@ -382,16 +362,21 @@ class DiT(nn.Module):
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
         # Initialize label embedding table:
-        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        nn.init.normal_(self.c_embedder.embedding_table.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
-        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        for module in [self.t_embedder, self.h_embedder, self.w_embedder, self.interval_embedder, self.c_embedder]:
+            nn.init.normal_(module.mlp[0].weight, std=0.02)
+            nn.init.constant_(module.mlp[0].bias, 0)
+            nn.init.normal_(module.mlp[2].weight, std=0.02)
+            nn.init.constant_(module.mlp[2].bias, 0)
 
-        # Zero-out adaLN modulation layers in DiT blocks:
+        # Initial state of a residual block is always identity mapping:
         for block in self.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(block.attn.proj.weight, 0)
+            nn.init.constant_(block.attn.proj.bias, 0)
+            nn.init.constant_(block.mlp.w3.weight, 0)
+            nn.init.constant_(block.mlp.w3.bias, 0)
 
         # Zero-out output layers:
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
@@ -458,61 +443,6 @@ class DiT(nn.Module):
 
 
 #################################################################################
-#                   Sine/Cosine Positional Embedding Functions                  #
-#################################################################################
-# https://github.com/facebookresearch/mae/blob/main/util/pos_embed.py
-
-def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
-    """
-    grid_size: int of the grid height and width
-    return:
-    pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
-    """
-    grid_h = np.arange(grid_size, dtype=np.float32)
-    grid_w = np.arange(grid_size, dtype=np.float32)
-    grid = np.meshgrid(grid_w, grid_h)  # here w goes first
-    grid = np.stack(grid, axis=0)
-
-    grid = grid.reshape([2, 1, grid_size, grid_size])
-    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
-    if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
-    return pos_embed
-
-
-def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
-    assert embed_dim % 2 == 0
-
-    # use half of dimensions to encode grid_h
-    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
-    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
-
-    emb = np.concatenate([emb_h, emb_w], axis=1) # (H*W, D)
-    return emb
-
-
-def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
-    """
-    embed_dim: output dimension for each position
-    pos: a list of positions to be encoded: size (M,)
-    out: (M, D)
-    """
-    assert embed_dim % 2 == 0
-    omega = np.arange(embed_dim // 2, dtype=np.float64)
-    omega /= embed_dim / 2.
-    omega = 1. / 10000**omega  # (D/2,)
-
-    pos = pos.reshape(-1)  # (M,)
-    out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
-
-    emb_sin = np.sin(out)  # (M, D/2)
-    emb_cos = np.cos(out)  # (M, D/2)
-
-    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
-    return emb
-
-
-#################################################################################
 #                                   DiT Configs                                  #
 #################################################################################
 
@@ -522,6 +452,10 @@ def iMF_XL(**kwargs) -> DiT:
 
 def iMF_L(**kwargs) -> DiT:
     return DiT(depth=32, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
+
+
+def iMF_M(**kwargs) -> DiT:
+    return DiT(depth=24, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
 
 
 def iMF_B(**kwargs) -> DiT:
